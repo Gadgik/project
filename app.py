@@ -1,7 +1,6 @@
 import requests
 import numpy as np
 import matplotlib.pyplot as plt
-import networkx as nx
 import gradio as gr
 from mpl_toolkits.mplot3d import Axes3D
 import psycopg2
@@ -12,19 +11,18 @@ DB_URL = "postgresql://postgres:1234@localhost:5432/postgres"
 # Глобальная переменная для API URL
 API_URL = "https://olimp.miet.ru/ppo_it/api"
 
-# Подключение к базе данных и создание таблиц при необходимости
+def set_api_url(api_url):
+    global API_URL
+    API_URL = api_url
+
 def init_db():
     conn = psycopg2.connect(DB_URL)
     cursor = conn.cursor()
-    
-    # Таблица для хранения карты
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS mars_map (
             map_data BYTEA
         )
     """)
-    
-    # Таблица для хранения координат модулей и стоимости установки базовых станций
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS module_data (
             id SERIAL PRIMARY KEY,
@@ -36,8 +34,6 @@ def init_db():
             engel_price FLOAT
         )
     """)
-    
-    # Таблица для хранения информации о базовых станциях
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS stations (
             id SERIAL PRIMARY KEY,
@@ -46,19 +42,16 @@ def init_db():
             type VARCHAR(10)
         )
     """)
-    
     conn.commit()
     cursor.close()
     conn.close()
 
-# Функция для запроса тайла
 def fetch_tile():
     response = requests.get(f"{API_URL}")
     if response.status_code == 200:
         return np.array(response.json()["message"]["data"], dtype=np.uint8)
     return None
 
-# Функция для получения данных о модулях и стоимости
 def fetch_coords_and_prices():
     response = requests.get(f"{API_URL}/coords")
     if response.status_code == 200:
@@ -66,7 +59,6 @@ def fetch_coords_and_prices():
         return data["sender"], data["listener"], data["price"]
     return (None, None, None)
 
-# Функция для сборки карты из 16 тайлов
 def assemble_map():
     full_map = np.zeros((256, 256), dtype=np.uint8)
     for row in range(4):
@@ -81,11 +73,10 @@ def assemble_map():
 def check(tile, full_map):
     for row in range(4):
         for col in range(4):
-            if sum(sum(full_map[row * 64:(row + 1) * 64, col * 64:(col + 1) * 64] == tile)) == 64 * 64:
+            if np.array_equal(full_map[row * 64:(row + 1) * 64, col * 64:(col + 1) * 64], tile):
                 return False
     return True
 
-# Функция для поиска возвышенностей (локальных максимумов)
 def find_peaks(height_map):
     peaks = []
     for x in range(1, 255):
@@ -94,59 +85,6 @@ def find_peaks(height_map):
                 peaks.append((x, y, height_map[x, y]))
     return peaks
 
-# Сохранение карты в базу данных
-def save_map_to_db(map_data):
-    conn = psycopg2.connect(DB_URL)
-    cursor = conn.cursor()
-    
-    # Удаляем предыдущие данные карты
-    cursor.execute("DELETE FROM mars_map")
-    
-    # Сохраняем новую карту
-    cursor.execute("INSERT INTO mars_map (map_data) VALUES (%s)", (map_data.tobytes(),))
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-# Сохранение данных о модулях и стоимости в базу данных
-def save_module_data_to_db(sender, listener, cuper_price, engel_price):
-    conn = psycopg2.connect(DB_URL)
-    cursor = conn.cursor()
-    
-    # Удаляем предыдущие данные
-    cursor.execute("DELETE FROM module_data")
-    
-    # Вставляем новые данные
-    cursor.execute(
-        "INSERT INTO module_data (sender_x, sender_y, listener_x, listener_y, cuper_price, engel_price) VALUES (%s, %s, %s, %s, %s, %s)",
-        (sender[0], sender[1], listener[0], listener[1], cuper_price, engel_price)
-    )
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-# Сохранение данных о станциях в базу данных
-def save_stations_to_db(stations):
-    conn = psycopg2.connect(DB_URL)
-    cursor = conn.cursor()
-    
-    # Удаляем предыдущие данные
-    cursor.execute("DELETE FROM stations")
-    
-    # Вставляем новые данные
-    for x, y, station_type in stations:
-        cursor.execute(
-            "INSERT INTO stations (x, y, type) VALUES (%s, %s, %s)",
-            (x, y, station_type)
-        )
-    
-    conn.commit()
-    cursor.close()
-    conn.close()
-
-# Функция для 3D визуализации карты
 def plot_3d_map(angle=30):
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection='3d')
@@ -156,40 +94,83 @@ def plot_3d_map(angle=30):
     ax.set_title("3D карта Марса")
     return fig
 
-# Функция для вращения карты в реальном времени
-def rotate_map(angle):
-    return plot_3d_map(angle)
+def visualize_modules():
+    fig, ax = plt.subplots()
+    ax.imshow(mars_map, cmap='gray')
+    ax.scatter([sender[0], listener[0]], [sender[1], listener[1]], c='red', label='Модули')
+    ax.legend()
+    return fig
 
-# Подготовка данных и сохранение в базу
+def visualize_stations():
+    fig, ax = plt.subplots()
+    ax.imshow(mars_map, cmap='gray')
+    for x, y, station_type in stations:
+        color = 'blue' if station_type == "Cuper" else 'green'
+        ax.scatter(x, y, c=color, label=station_type)
+    ax.legend()
+    return fig
+
+def visualize_coverage():
+    fig, ax = plt.subplots()
+    ax.imshow(mars_map, cmap='gray')
+    for x, y, station_type in stations:
+        radius = 32 if station_type == "Cuper" else 64
+        circle = plt.Circle((x, y), radius, color='blue' if station_type == "Cuper" else 'green', fill=False)
+        ax.add_patch(circle)
+    return fig
+
+def station_count():
+    cuper_count = sum(1 for _, _, t in stations if t == "Cuper")
+    engel_count = sum(1 for _, _, t in stations if t == "Engel")
+    total_cost = cuper_count * cuper_price + engel_count * engel_price
+    return f"Cuper: {cuper_count}, Engel: {engel_count}, Total Cost: {total_cost:.2f} байткоинов"
+
 init_db()
-
-# Получаем координаты модулей и стоимость станций
 sender, listener, prices = fetch_coords_and_prices()
 cuper_price, engel_price = prices
-save_module_data_to_db(sender, listener, cuper_price, engel_price)
-
-# Собираем карту
 mars_map = assemble_map()
-save_map_to_db(mars_map)
-
-# Ищем пики для установки базовых станций
 peaks = find_peaks(mars_map)
-stations = []
-for x, y, height in peaks:
-    if height > 200:  # Условие для выбора высоты
-        if len(stations) % 2 == 0:
-            stations.append((x, y, "Cuper"))
-        else:
-            stations.append((x, y, "Engel"))
-save_stations_to_db(stations)
+stations = [(x, y, "Cuper" if i % 2 == 0 else "Engel") for i, (x, y, h) in enumerate(peaks) if h > 200]
 
-# Интерфейс Gradio для 3D карты
 demo = gr.Interface(
-    fn=rotate_map,
-    inputs=gr.Slider(0, 360, step=5, label="Угол поворота"),
-    outputs=gr.Plot(),
+    fn=station_count,
+    inputs=[],
+    outputs="text",
     title="Марсианская карта",
-    description="Трехмерная карта Марса с возможностью вращения"
+    description="Анализ базовых станций"
 )
 
-demo.launch()
+map_demo = gr.Interface(
+    fn=plot_3d_map,
+    inputs=gr.Slider(0, 360, step=5, label="Угол поворота"),
+    outputs=gr.Plot()
+)
+
+modules_demo = gr.Interface(
+    fn=visualize_modules,
+    inputs=[],
+    outputs=gr.Plot()
+)
+
+stations_demo = gr.Interface(
+    fn=visualize_stations,
+    inputs=[],
+    outputs=gr.Plot()
+)
+
+coverage_demo = gr.Interface(
+    fn=visualize_coverage,
+    inputs=[],
+    outputs=gr.Plot()
+)
+
+api_input = gr.Interface(
+    fn=set_api_url,
+    inputs=gr.Textbox(label="API URL"),
+    outputs=[]
+)
+
+gr.TabbedInterface(
+    [api_input, map_demo, modules_demo, stations_demo, coverage_demo, demo],
+    ["API", "Карта", "Модули", "Станции", "Зоны покрытия", "Статистика"]
+).launch()
